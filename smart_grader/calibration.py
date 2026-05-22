@@ -79,7 +79,7 @@ def _summary_stats(values: list[float]) -> tuple[float, float]:
     return mean, math.sqrt(var)
 
 
-def calibrate_note(note) -> dict:
+def _calibrate_one(note) -> dict:
     """
     Calibrate a single note. Returns a diagnostics dict; raises on hard failures
     (missing fields, API errors) so the caller can decide whether to skip or abort.
@@ -176,7 +176,7 @@ def calibrate_selected_notes(nids: Iterable[int], col) -> tuple[int, int]:
 
         try:
             note = col.get_note(nid)
-            calibrate_note(note)
+            _calibrate_one(note)
             done += 1
         except Exception as e:
             # Skip and continue — partial progress is better than an aborted batch.
@@ -184,3 +184,7 @@ def calibrate_selected_notes(nids: Iterable[int], col) -> tuple[int, int]:
             skipped += 1
     progress.setValue(len(nids))
     return done, skipped
+
+
+# Backwards-compatible alias. New code should import from smart_grader.api.
+calibrate_note = _calibrate_one
