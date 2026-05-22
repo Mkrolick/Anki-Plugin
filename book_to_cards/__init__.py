@@ -5,6 +5,13 @@ wiring lands in Task 16.
 """
 from __future__ import annotations
 
+import os
+import sys
+
+_VENDOR = os.path.join(os.path.dirname(__file__), "_vendor")
+if _VENDOR not in sys.path:
+    sys.path.insert(0, _VENDOR)
+
 from aqt import mw
 from aqt.qt import QAction
 
