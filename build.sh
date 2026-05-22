@@ -1,21 +1,33 @@
 #!/usr/bin/env bash
-# Build smart_grader.ankiaddon from the smart_grader/ source tree.
+# Build smart_grader.ankiaddon and book_to_cards.ankiaddon from source.
 # Anki requires files at the ROOT of the .ankiaddon zip, not nested in a folder.
 set -euo pipefail
 
 cd "$(dirname "$0")"
-OUT="smart_grader.ankiaddon"
-rm -f "$OUT"
 
-# Sanity-check that the Python modules at least parse before we ship.
-python3 -m py_compile smart_grader/*.py
+build_addon() {
+  local name="$1"
+  local out="${name}.ankiaddon"
+  rm -f "$out"
 
-# `cd smart_grader && zip ..` so paths in the zip are root-relative.
-(cd smart_grader && zip -qr "../$OUT" . \
-  -x "*.DS_Store" \
-  -x "__pycache__/*" \
-  -x "*.pyc" \
-  -x "embedding_cache.sqlite")
+  # Compile only the package's own .py files (skip vendored deps).
+  find "$name" -name "*.py" -not -path "*/_vendor/*" -print0 \
+    | xargs -0 python3 -m py_compile
 
-echo "Built $OUT:"
-unzip -l "$OUT"
+  (cd "$name" && zip -qr "../$out" . \
+    -x "*.DS_Store" \
+    -x "__pycache__/*" \
+    -x "*/__pycache__/*" \
+    -x "*.pyc" \
+    -x "embedding_cache.sqlite" \
+    -x "user_files/*")
+
+  echo "Built $out:"
+  unzip -l "$out" | tail -5
+}
+
+build_addon smart_grader
+
+if [ -d book_to_cards ]; then
+  build_addon book_to_cards
+fi

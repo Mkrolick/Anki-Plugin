@@ -1,0 +1,6 @@
+{
+    "name": "Book to Cards",
+    "package": "book_to_cards",
+    "min_point_version": 231000,
+    "tested_on": [241100, 250100]
+}
