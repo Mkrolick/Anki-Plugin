@@ -1,8 +1,9 @@
-"""Sliding-window iterator over pages.
+"""Sliding-window iterator over pages, plus the LLM-driven map stage.
 
-step = size - overlap. The LAST chunk is anchored to the end of the book
-so the tail page always appears in some chunk even when the book length
-doesn't divide evenly.
+`chunk_iter` yields list[Page] windows; `run_map` calls an LLM client on
+each chunk and yields one structured result dict per chunk (success or
+isolated failure). The runner persists each yielded dict immediately so
+a crash mid-loop loses at most one chunk's worth of in-flight work.
 """
 from __future__ import annotations
 
@@ -36,3 +37,56 @@ def chunk_iter(pages: list[Page], *, size: int, overlap: int) -> Iterator[list[P
         start += step
     if last_end < n:
         yield pages[max(0, n - size):n]
+
+
+_SYSTEM_PROMPT = """\
+You are an expert at extracting study material from textbooks. For the
+passage below, list every noteworthy fact, definition, mechanism, or claim
+a student should remember. For each item return:
+  - "text": a one-sentence distillation
+  - "quote": the EXACT verbatim excerpt from the passage (do not edit)
+  - "topic": a short topic name (1-4 words)
+  - "source_pages": the page numbers (from the [Page N] markers) the excerpt came from
+
+Respond with a single JSON object: {"aspects": [...]}. No prose, no fences.
+"""
+
+
+def _build_user_prompt(chunk: list[Page]) -> str:
+    parts: list[str] = []
+    for page in chunk:
+        parts.append(f"[Page {page.index}]")
+        parts.append(page.text)
+    return "\n".join(parts)
+
+
+def run_map(pages, *, llm, size: int, overlap: int, model: str | None = None):
+    """Yield one dict per chunk.
+
+    On success: {"chunk_index", "source_pages", "aspects": [...], "error": None}
+    On failure: {"chunk_index", "source_pages", "aspects": [], "error": "msg"}
+    """
+    for i, chunk in enumerate(chunk_iter(pages, size=size, overlap=overlap)):
+        source_pages = [p.index for p in chunk]
+        try:
+            response = llm.chat_json(
+                model=model or "gpt-4o-mini",
+                system=_SYSTEM_PROMPT,
+                user=_build_user_prompt(chunk),
+            )
+            aspects = response.get("aspects") or []
+            if not isinstance(aspects, list):
+                raise RuntimeError(f"map returned non-list aspects: {type(aspects).__name__}")
+            yield {
+                "chunk_index": i,
+                "source_pages": source_pages,
+                "aspects": aspects,
+                "error": None,
+            }
+        except Exception as e:
+            yield {
+                "chunk_index": i,
+                "source_pages": source_pages,
+                "aspects": [],
+                "error": str(e),
+            }
