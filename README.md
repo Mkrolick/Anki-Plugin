@@ -73,3 +73,23 @@ Recompiles every module under `smart_grader/` and rebuilds `smart_grader.ankiadd
 ## When calibration is unreliable
 
 If the LLM's "bad" paraphrases end up *more* similar to the reference than the worst "good" paraphrase, the two distributions overlap. The diagnostics blob records `"overlap_warning": true` for those cards. Usually it means the reference answer is too short to distinguish from near-misses by embedding distance alone — consider expanding the answer or relying more on the keyword gate.
+
+## Book to Cards (companion add-on)
+
+A second add-on, `book_to_cards`, ingests a PDF and auto-generates flashcards via an extract → map → merge → reduce pipeline. Install both add-ons to get auto-calibration on every generated card.
+
+1. Install `book_to_cards.ankiaddon` via **Tools → Add-ons → Install from file…**, then set your OpenAI key in its Config.
+2. **Tools → Generate cards from PDF…**, pick a PDF, pick a deck, set a cost ceiling, hit OK.
+3. The progress dialog shows live cost; you can keep reviewing other decks while it runs.
+
+Roughly $0.50 per 450-page book at gpt-4o-mini rates. See `docs/superpowers/specs/2026-05-22-book-to-cards-design.md` for the full design and `docs/superpowers/plans/2026-05-22-book-to-cards.md` for the implementation breakdown.
+
+## Running the unit tests
+
+```
+python3 -m venv .venv
+.venv/bin/pip install pytest reportlab pdfminer.six
+.venv/bin/python -m pytest tests/ -q
+```
+
+Tests that touch real Anki (deck_writer integration) skip automatically when `anki` isn't installed on the host Python — they run inside Anki's bundled interpreter for the end-to-end smoke test.
