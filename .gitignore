@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .DS_Store
 smart_grader/embedding_cache.sqlite
+book_to_cards/embedding_cache.sqlite
+.env
+.env.*
