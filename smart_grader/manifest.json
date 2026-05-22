@@ -1,0 +1,6 @@
+{
+    "name": "Smart Grader",
+    "package": "smart_grader",
+    "min_point_version": 231000,
+    "tested_on": [241100, 250100]
+}
