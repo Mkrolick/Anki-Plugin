@@ -29,12 +29,19 @@ import json
 import math
 from typing import Iterable
 
-from aqt import mw
-from aqt.qt import QProgressDialog, Qt
+# aqt imports are guarded so this module is importable in headless tests.
+# precompute_calibration() runs entirely without aqt; apply_calibration() and
+# calibrate_selected_notes() require it and will raise at call time if missing.
+try:
+    from aqt import mw
+    from aqt.qt import QProgressDialog, Qt
+except ImportError:
+    mw = None  # type: ignore[assignment]
+    QProgressDialog = Qt = None  # type: ignore[assignment]
 
 from .config import get_config
 from .grader import cosine
-from .openai_client import embed, generate_keywords, generate_paraphrases
+from .openai_client import batch_embed, generate_keywords, generate_paraphrases
 
 
 THRESHOLD_FIELD = "_grader_threshold"
@@ -79,81 +86,117 @@ def _summary_stats(values: list[float]) -> tuple[float, float]:
     return mean, math.sqrt(var)
 
 
-def _calibrate_one(note) -> dict:
-    """
-    Calibrate a single note. Returns a diagnostics dict; raises on hard failures
-    (missing fields, API errors) so the caller can decide whether to skip or abort.
-    """
-    cfg = get_config()
-    answer_field = _find_answer_field(note)
-    if answer_field is None:
-        raise ValueError("No answer field found (looked for Back/Answer/Definition).")
-    question_field = _find_field(note, QUESTION_FIELD_CANDIDATES)
+def precompute_calibration(
+    *,
+    question: str,
+    reference: str,
+    keywords: list[str] | None = None,
+) -> dict:
+    """Run the LLM + embedding work for one card. **No Anki collection access.**
 
-    reference = note[answer_field].strip()
+    Designed to be called from a background thread (e.g. book_to_cards's
+    worker) so the Anki main thread isn't blocked for ~10s per card. The
+    returned dict carries everything apply_calibration() needs to write the
+    note fields on the main thread in a near-instant operation.
+
+    If `keywords` is omitted, the model is asked to pick them. All embeddings
+    (reference + good + bad) are fetched in a single batched HTTP call.
+    """
     if not reference:
-        raise ValueError("Answer field is empty.")
-    question = note[question_field].strip() if question_field else ""
-
-    # Make sure target fields exist on this note type before we try to write.
-    # Keywords is included so calibration works on note types that never had it.
-    model = note.note_type()
-    added_kw = _ensure_field(model, KEYWORDS_FIELD)
-    added_threshold = _ensure_field(model, THRESHOLD_FIELD)
-    added_diag = _ensure_field(model, DIAGNOSTICS_FIELD)
-    added_ref = _ensure_field(model, REF_EMBEDDING_FIELD)
-    if added_kw or added_threshold or added_diag or added_ref:
-        # Re-load the note so it picks up the new fields.
-        note = mw.col.get_note(note.id)
-
-    # Keywords are AI-generated when the field is empty so the user only needs
-    # to author the question + answer. User-typed keywords are left alone.
-    existing_kw = note[KEYWORDS_FIELD].strip() if KEYWORDS_FIELD in note else ""
-    if not existing_kw:
+        raise ValueError("Reference text is empty.")
+    cfg = get_config()
+    if not keywords:
         keywords = generate_keywords(question, reference)
-        note[KEYWORDS_FIELD] = ", ".join(keywords)
-    else:
-        keywords = [k.strip() for k in existing_kw.split(",") if k.strip()]
-
     paraphrases = generate_paraphrases(reference, keywords)
     good_texts = paraphrases["good"]
     bad_texts = paraphrases["bad"]
 
-    ref_vec = embed(reference)
-    good_sims = [cosine(ref_vec, embed(t)) for t in good_texts]
-    bad_sims = [cosine(ref_vec, embed(t)) for t in bad_texts]
+    # One HTTP call for every vector we'll need.
+    all_texts = [reference] + good_texts + bad_texts
+    all_vecs = batch_embed(all_texts)
+    ref_vec = all_vecs[0]
+    good_vecs = all_vecs[1:1 + len(good_texts)]
+    bad_vecs = all_vecs[1 + len(good_texts):]
 
+    good_sims = [cosine(ref_vec, v) for v in good_vecs]
+    bad_sims = [cosine(ref_vec, v) for v in bad_vecs]
     good_mean, good_std = _summary_stats(good_sims)
     bad_mean, bad_std = _summary_stats(bad_sims)
 
-    # Core threshold rule. Note this is intentionally NOT "mean - 2*std" — that
-    # framing assumes a Gaussian, but with ~12 samples and bounded support in
-    # [-1, 1], the floor-of-good / ceiling-of-bad rule is more robust.
     floor_of_good = min(good_sims) if good_sims else cfg["fallback_threshold"]
     ceiling_of_bad = max(bad_sims) if bad_sims else 0.0
     threshold = max(floor_of_good, ceiling_of_bad + cfg["epsilon_above_bad"])
-
-    # If the bad ceiling is above the good floor, the LLM gave us overlapping
-    # distributions — calibration is unreliable for this card. We still pick
-    # the more conservative threshold, but flag it.
     overlap = ceiling_of_bad >= floor_of_good
-    note[THRESHOLD_FIELD] = f"{threshold:.4f}"
-    # Persist the reference embedding so review never has to recompute it.
-    note[REF_EMBEDDING_FIELD] = json.dumps(ref_vec)
-    note[DIAGNOSTICS_FIELD] = json.dumps({
+
+    return {
+        "keywords": keywords,
         "threshold": threshold,
-        "good_mean": good_mean,
-        "good_std": good_std,
-        "good_min": min(good_sims) if good_sims else None,
-        "bad_mean": bad_mean,
-        "bad_std": bad_std,
-        "bad_max": max(bad_sims) if bad_sims else None,
-        "overlap_warning": overlap,
-        "n_good": len(good_sims),
-        "n_bad": len(bad_sims),
-    }, indent=2)
+        "ref_vec": ref_vec,
+        "diagnostics": {
+            "threshold": threshold,
+            "good_mean": good_mean,
+            "good_std": good_std,
+            "good_min": min(good_sims) if good_sims else None,
+            "bad_mean": bad_mean,
+            "bad_std": bad_std,
+            "bad_max": max(bad_sims) if bad_sims else None,
+            "overlap_warning": overlap,
+            "n_good": len(good_sims),
+            "n_bad": len(bad_sims),
+        },
+    }
+
+
+def apply_calibration(note, calibration: dict) -> dict:
+    """Write pre-computed calibration values onto a note. **Must run on
+    Anki's main thread** (uses mw.col).
+
+    Ensures the model has the required fields, then writes
+    Keywords / _grader_threshold / _grader_ref_embedding / _grader_calibration.
+    """
+    model = note.note_type()
+    added = False
+    for fname in (KEYWORDS_FIELD, THRESHOLD_FIELD, DIAGNOSTICS_FIELD, REF_EMBEDDING_FIELD):
+        if _ensure_field(model, fname):
+            added = True
+    if added:
+        note = mw.col.get_note(note.id)
+
+    # If keywords were pre-typed by the user, keep theirs. Otherwise stamp
+    # the model-picked ones from precompute_calibration.
+    existing_kw = note[KEYWORDS_FIELD].strip() if KEYWORDS_FIELD in note else ""
+    if not existing_kw:
+        note[KEYWORDS_FIELD] = ", ".join(calibration["keywords"])
+
+    note[THRESHOLD_FIELD] = f"{calibration['threshold']:.4f}"
+    note[REF_EMBEDDING_FIELD] = json.dumps(calibration["ref_vec"])
+    note[DIAGNOSTICS_FIELD] = json.dumps(calibration["diagnostics"], indent=2)
     mw.col.update_note(note)
-    return {"nid": note.id, "threshold": threshold, "overlap": overlap}
+    return {"nid": note.id, "threshold": calibration["threshold"],
+            "overlap": calibration["diagnostics"]["overlap_warning"]}
+
+
+def _calibrate_one(note) -> dict:
+    """End-to-end calibration of a single Anki note.
+
+    Convenience wrapper that combines precompute_calibration (slow, no col)
+    and apply_calibration (fast, needs col). Used by the smart_grader menu
+    flow which runs entirely on the main thread.
+    """
+    answer_field = _find_answer_field(note)
+    if answer_field is None:
+        raise ValueError("No answer field found (looked for Back/Answer/Definition).")
+    question_field = _find_field(note, QUESTION_FIELD_CANDIDATES)
+    reference = note[answer_field].strip()
+    question = note[question_field].strip() if question_field else ""
+
+    existing_kw = note[KEYWORDS_FIELD].strip() if KEYWORDS_FIELD in note else ""
+    keywords = [k.strip() for k in existing_kw.split(",") if k.strip()] or None
+
+    calibration = precompute_calibration(
+        question=question, reference=reference, keywords=keywords,
+    )
+    return apply_calibration(note, calibration)
 
 
 def calibrate_selected_notes(nids: Iterable[int], col) -> tuple[int, int]:

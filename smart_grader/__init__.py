@@ -21,9 +21,13 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from aqt import gui_hooks, mw
-from aqt.qt import QAction, QMessageBox
-from aqt.utils import showInfo, tooltip
+try:
+    from aqt import gui_hooks, mw
+    from aqt.qt import QAction, QMessageBox
+    from aqt.utils import showInfo, tooltip
+    _AQT_AVAILABLE = True
+except ImportError:
+    _AQT_AVAILABLE = False
 
 from .grader import evaluate_answer
 from .calibration import calibrate_selected_notes
@@ -148,7 +152,10 @@ def _install_menu():
 
 
 # Register hooks at import time. Anki imports __init__.py once on startup.
-gui_hooks.card_will_show.append(on_card_will_show)
-gui_hooks.reviewer_did_show_question.append(on_reviewer_did_show_question)
-gui_hooks.webview_did_receive_js_message.append(on_js_message)
-_install_menu()
+# Headless tests can still import the package; only the Anki-side wiring is
+# guarded behind aqt's presence.
+if _AQT_AVAILABLE:
+    gui_hooks.card_will_show.append(on_card_will_show)
+    gui_hooks.reviewer_did_show_question.append(on_reviewer_did_show_question)
+    gui_hooks.webview_did_receive_js_message.append(on_js_message)
+    _install_menu()

@@ -27,3 +27,20 @@ def calibrate_note(note) -> dict:
     """
     from .calibration import _calibrate_one
     return _calibrate_one(note)
+
+
+def precompute_calibration(*, question: str, reference: str, keywords=None) -> dict:
+    """Run the LLM + embedding work for a card without touching Anki.
+
+    Safe to call from a background thread. Returns a dict with the values
+    apply_calibration() needs. Useful for batched flows like book_to_cards,
+    which calls this off the main thread so insertion can be fast.
+    """
+    from .calibration import precompute_calibration as _impl
+    return _impl(question=question, reference=reference, keywords=keywords)
+
+
+def apply_calibration(note, calibration: dict) -> dict:
+    """Write pre-computed calibration onto an Anki note. Must run on main."""
+    from .calibration import apply_calibration as _impl
+    return _impl(note, calibration)

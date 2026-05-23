@@ -106,30 +106,56 @@ class OpenAIClient:
             raise RuntimeError("OpenAI API key not configured.")
 
     def embed(self, text: str, *, model: str | None = None) -> list[float]:
+        """Single-input wrapper around batch_embed."""
+        return self.batch_embed([text], model=model)[0]
+
+    def batch_embed(self, texts: list[str], *, model: str | None = None) -> list[list[float]]:
+        """Embed `texts` in (at most) one HTTP call.
+
+        Cache-aware: already-known vectors come from SQLite; only the uncached
+        subset hits the network. Vectors are returned in input order.
+        """
+        if not texts:
+            return []
         cfg = get_config()
         m = model or cfg["embedding_model"]
-        key = _cache_key(text, m)
+
+        results: dict[int, list[float]] = {}
+        uncached_indices: list[int] = []
+        uncached_texts: list[str] = []
+
         conn = _cache_conn()
         try:
-            row = conn.execute("SELECT vector FROM embeddings WHERE key = ?", (key,)).fetchone()
-            if row is not None:
-                return json.loads(row[0])
-            resp = _http_post_json(
-                "https://api.openai.com/v1/embeddings",
-                {"model": m, "input": text},
-                self._api_key,
-            )
-            usage = resp.get("usage", {})
-            self.meter.record(m, usage.get("prompt_tokens", 0), 0)
-            vec = resp["data"][0]["embedding"]
-            conn.execute(
-                "INSERT OR REPLACE INTO embeddings(key, model, vector) VALUES (?, ?, ?)",
-                (key, m, json.dumps(vec)),
-            )
-            conn.commit()
-            return vec
+            for i, text in enumerate(texts):
+                key = _cache_key(text, m)
+                row = conn.execute("SELECT vector FROM embeddings WHERE key = ?", (key,)).fetchone()
+                if row is not None:
+                    results[i] = json.loads(row[0])
+                else:
+                    uncached_indices.append(i)
+                    uncached_texts.append(text)
+
+            if uncached_texts:
+                resp = _http_post_json(
+                    "https://api.openai.com/v1/embeddings",
+                    {"model": m, "input": uncached_texts},
+                    self._api_key,
+                )
+                usage = resp.get("usage", {})
+                self.meter.record(m, usage.get("prompt_tokens", 0), 0)
+                for batch_idx, orig_idx in enumerate(uncached_indices):
+                    vec = resp["data"][batch_idx]["embedding"]
+                    results[orig_idx] = vec
+                    key = _cache_key(uncached_texts[batch_idx], m)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO embeddings(key, model, vector) VALUES (?, ?, ?)",
+                        (key, m, json.dumps(vec)),
+                    )
+                conn.commit()
         finally:
             conn.close()
+
+        return [results[i] for i in range(len(texts))]
 
     def chat_json(
         self,

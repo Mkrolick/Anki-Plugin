@@ -10,9 +10,10 @@ from typing import Any
 
 @dataclass
 class ResumeState:
-    next_stage: str               # "extract" | "map" | "merge" | "reduce" | "done"
+    next_stage: str               # "extract" | "map" | "merge" | "reduce" | "calibrate" | "insert" | "done"
     map_resume_from: int = 0
     reduce_resume_from: int = 0
+    calibrate_resume_from: int = 0
     cold_restart: bool = False
 
 
@@ -71,6 +72,7 @@ def detect_resume_state(run_dir: Path, *, expected_manifest: dict | None = None)
     map_jsonl = run_dir / "map.jsonl"
     topics = run_dir / "topics.json"
     cards = run_dir / "cards.jsonl"
+    calibrated = run_dir / "calibrated.jsonl"
 
     if not extract.exists():
         return ResumeState(next_stage="extract")
@@ -82,4 +84,7 @@ def detect_resume_state(run_dir: Path, *, expected_manifest: dict | None = None)
     if not cards.exists() or not _jsonl_is_complete(cards):
         n = _jsonl_count_entries(cards) if cards.exists() else 0
         return ResumeState(next_stage="reduce", reduce_resume_from=n)
-    return ResumeState(next_stage="done")
+    if not calibrated.exists() or not _jsonl_is_complete(calibrated):
+        n = _jsonl_count_entries(calibrated) if calibrated.exists() else 0
+        return ResumeState(next_stage="calibrate", calibrate_resume_from=n)
+    return ResumeState(next_stage="insert")

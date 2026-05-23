@@ -1,5 +1,7 @@
-"""Config accessor — reads from Anki's per-addon config (managed by Anki itself)."""
-from aqt import mw
+"""Config accessor — reads from Anki's per-addon config (managed by Anki itself).
+
+aqt is imported lazily so this module can be imported in headless tests.
+"""
 
 DEFAULTS = {
     "openai_api_key": "",
@@ -15,5 +17,6 @@ DEFAULTS = {
 
 
 def get_config() -> dict:
+    from aqt import mw
     raw = mw.addonManager.getConfig(__name__.split(".")[0]) or {}
     return {**DEFAULTS, **raw}

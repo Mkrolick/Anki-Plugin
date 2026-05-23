@@ -68,34 +68,64 @@ def _http_post_json(url: str, body: dict, api_key: str, timeout: int = 30) -> di
 
 
 def embed(text: str) -> list[float]:
-    """Return the embedding for `text`, caching by (model, text) hash."""
+    """Return the embedding for `text`, caching by (model, text) hash.
+
+    Single-input wrapper around batch_embed; kept for backwards compatibility.
+    """
+    return batch_embed([text])[0]
+
+
+def batch_embed(texts: list[str]) -> list[list[float]]:
+    """Embed a list of texts in (at most) one HTTP call.
+
+    Cache-aware: any texts whose vectors are already on disk are served from
+    SQLite; only the uncached subset hits the network. Returns vectors in
+    the same order as the input list.
+
+    Empty list returns []; the OpenAI API rejects empty inputs.
+    """
+    if not texts:
+        return []
     cfg = get_config()
     model = cfg["embedding_model"]
     api_key = cfg["openai_api_key"]
     if not api_key:
         raise RuntimeError("OpenAI API key not configured.")
 
-    key = _cache_key(text, model)
+    results: dict[int, list[float]] = {}
+    uncached_indices: list[int] = []
+    uncached_texts: list[str] = []
+
     conn = _cache_conn()
     try:
-        row = conn.execute("SELECT vector FROM embeddings WHERE key = ?", (key,)).fetchone()
-        if row is not None:
-            return json.loads(row[0])
+        for i, text in enumerate(texts):
+            key = _cache_key(text, model)
+            row = conn.execute("SELECT vector FROM embeddings WHERE key = ?", (key,)).fetchone()
+            if row is not None:
+                results[i] = json.loads(row[0])
+            else:
+                uncached_indices.append(i)
+                uncached_texts.append(text)
 
-        resp = _http_post_json(
-            "https://api.openai.com/v1/embeddings",
-            {"model": model, "input": text},
-            api_key,
-        )
-        vec = resp["data"][0]["embedding"]
-        conn.execute(
-            "INSERT OR REPLACE INTO embeddings(key, model, vector) VALUES (?, ?, ?)",
-            (key, model, json.dumps(vec)),
-        )
-        conn.commit()
-        return vec
+        if uncached_texts:
+            resp = _http_post_json(
+                "https://api.openai.com/v1/embeddings",
+                {"model": model, "input": uncached_texts},
+                api_key,
+            )
+            for batch_idx, orig_idx in enumerate(uncached_indices):
+                vec = resp["data"][batch_idx]["embedding"]
+                results[orig_idx] = vec
+                key = _cache_key(uncached_texts[batch_idx], model)
+                conn.execute(
+                    "INSERT OR REPLACE INTO embeddings(key, model, vector) VALUES (?, ?, ?)",
+                    (key, model, json.dumps(vec)),
+                )
+            conn.commit()
     finally:
         conn.close()
+
+    return [results[i] for i in range(len(texts))]
 
 
 _KEYWORDS_PROMPT = """\
