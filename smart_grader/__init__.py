@@ -47,7 +47,13 @@ def _find_answer_field(note) -> Optional[str]:
 
 
 def on_card_will_show(html: str, card, context: str) -> str:
-    """Inject the typing UI on the question side of eligible cards."""
+    """Inject the typing UI on the question side of eligible cards.
+
+    Only the HTML island (textarea, button, payload data-script tag) is
+    appended here; the JS handler is wired up by on_reviewer_did_show_question
+    via mw.reviewer.web.eval(...) because modern Anki strips <script> tags
+    from card HTML.
+    """
     if not context.endswith("Question"):
         return html
 
@@ -59,16 +65,23 @@ def on_card_will_show(html: str, card, context: str) -> str:
     if answer_field is None:
         return html
 
-    # Pass the reference answer + keywords + threshold into the page so the
-    # frontend can call back via pycmd. We never expose them visually until
-    # the user submits — they live in a hidden data island.
     payload = {
         "note_id": note.id,
         "reference": note[answer_field],
         "keywords": [k.strip() for k in note[KEYWORDS_FIELD].split(",") if k.strip()],
         "threshold": float(note[THRESHOLD_FIELD]) if THRESHOLD_FIELD in note and note[THRESHOLD_FIELD] else 0.82,
     }
-    return html + build_input_html(payload) + INJECT_JS
+    return html + build_input_html(payload)
+
+
+def on_reviewer_did_show_question(card):
+    """Inject the click + keydown handlers into the reviewer webview."""
+    note = card.note()
+    if KEYWORDS_FIELD not in note:
+        return
+    if _find_answer_field(note) is None:
+        return
+    mw.reviewer.web.eval(INJECT_JS)
 
 
 def on_js_message(handled, message: str, context):
@@ -136,5 +149,6 @@ def _install_menu():
 
 # Register hooks at import time. Anki imports __init__.py once on startup.
 gui_hooks.card_will_show.append(on_card_will_show)
+gui_hooks.reviewer_did_show_question.append(on_reviewer_did_show_question)
 gui_hooks.webview_did_receive_js_message.append(on_js_message)
 _install_menu()

@@ -56,12 +56,28 @@ This confirms:
 - **Reported by the addon:** $0.001 for the whole run (5 pages → 8 cards).
 - Consistent with the spec's $0.53 / 450-page estimate scaled down.
 
-## Known gaps (out of scope for the smoke)
+## Typed-answer flow (follow-up)
 
-- Did not exercise the typed-answer review flow on a generated card (the progress dialog held focus and made the Browse window navigation awkward through the computer-use driver). Calibration data is on the notes, so the typed-answer UI should activate when the deck is reviewed — but this is currently asserted by inspection of the DB rather than by clicking through the review.
+After the initial smoke run I drove a fresh review of the `Book - small` deck via computer-use. The typed-answer UI activated as expected; both pass and fail paths verified:
+
+- **Pass:** typed `Photosynthesis converts light energy into chemical energy.` → `✓ Passed`, similarity `1.000` / threshold `0.875`, all three chips (`photosynthesis`, `light energy`, `chemical energy`) green/found.
+- **Fail:** typed `Inside cells, in green plant parts.` on the next card → `✗ Missing required keyword(s)`, two missing chips (`photosynthesis`, `chloroplasts`), similarity not computed (keyword check fails fast), and an inline diff annotating what the answer lacked.
+
+### Bug discovered and fixed
+
+The first attempt produced no result panel — the click reached the button but `pycmd` never fired. Cause: modern Anki (25.02 here) strips `<script>` tags from card HTML returned by `card_will_show`. The handler-binding script in `smart_grader/ui.py` was being silently dropped.
+
+Fix: split HTML and JS injection.
+
+- `build_input_html` now stashes the payload on the root div as a `data-sg-payload` attribute and emits no script tag.
+- A new `gui_hooks.reviewer_did_show_question` handler calls `mw.reviewer.web.eval(INJECT_JS)` to wire up the click/keydown handlers from Python after the card renders. Since the eval bypasses the HTML sanitiser, the handlers attach reliably.
+- The IIFE now tracks installation via `window.__smartGraderBind` so subsequent cards rebind without re-installing the result-renderer.
+
+## Other known gaps
+
 - Did not test cost-ceiling abort path (the run cost $0.001 against a $5 ceiling; never close to triggering).
 - Did not test resumability (the run completed in one shot).
 
 ## Verdict
 
-Both add-ons install cleanly, the pipeline runs end-to-end against a real PDF, and Smart-Grader-ready cards land in the chosen deck. **Task 18 passes.**
+Both add-ons install cleanly, the pipeline runs end-to-end against a real PDF, Smart-Grader-ready cards land in the chosen deck, and the typed-answer review surface activates and grades correctly on those cards. **Task 18 passes.**

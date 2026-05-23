@@ -18,10 +18,11 @@ import json
 
 
 def build_input_html(payload: dict) -> str:
-    """payload = {note_id, reference, keywords, threshold}. We embed it as JSON."""
+    """Render the typing UI. The payload is stashed in a hidden div's
+    data-attribute (no <script> tag, because Anki strips those from card HTML)."""
     blob = html.escape(json.dumps(payload), quote=True)
     return f"""
-<div id="sg-root">
+<div id="sg-root" data-sg-payload="{blob}">
   <style>
     #sg-root {{ margin-top: 1.5em; font-family: inherit; }}
     #sg-input {{
@@ -50,22 +51,26 @@ def build_input_html(payload: dict) -> str:
   <textarea id="sg-input" placeholder="Type your answer, then press Ctrl/Cmd+Enter…"></textarea>
   <button id="sg-submit">Check answer</button>
   <div id="sg-result"></div>
-  <script type="application/json" id="sg-payload">{blob}</script>
 </div>
 """
 
 
-# Kept separate from build_input_html so we can ensure it's only injected once
-# even if Anki re-renders. The submit handler shells out to Python via pycmd.
+# JS body (no <script> wrapper). Modern Anki strips <script> tags from
+# card HTML for safety, so we run this via mw.reviewer.web.eval() in the
+# reviewer_did_show_question hook instead of letting Anki render it.
 INJECT_JS = """
-<script>
 (function() {
-  if (window.__smartGraderInstalled) return;
+  if (window.__smartGraderInstalled) {
+    // Re-run bind for the new card; the bound elements have new IDs each time.
+    if (typeof window.__smartGraderBind === "function") window.__smartGraderBind();
+    return;
+  }
   window.__smartGraderInstalled = true;
 
   function getPayload() {
-    var el = document.getElementById("sg-payload");
-    return el ? JSON.parse(el.textContent) : null;
+    var root = document.getElementById("sg-root");
+    var raw = root && root.getAttribute("data-sg-payload");
+    return raw ? JSON.parse(raw) : null;
   }
 
   function submit() {
@@ -109,24 +114,22 @@ INJECT_JS = """
       '<div>' + result.diff_html + '</div>';
   };
 
-  // Bind once the DOM is ready. Anki shows cards via webview reloads, so we
-  // attach inside DOMContentLoaded or immediately if already past that.
   function bind() {
     var btn = document.getElementById("sg-submit");
     var ta = document.getElementById("sg-input");
-    if (btn) btn.addEventListener("click", submit);
-    if (ta) {
+    if (btn && !btn.dataset.sgBound) {
+      btn.addEventListener("click", submit);
+      btn.dataset.sgBound = "1";
+    }
+    if (ta && !ta.dataset.sgBound) {
       ta.addEventListener("keydown", function(e) {
         if ((e.ctrlKey || e.metaKey) && e.key === "Enter") submit();
       });
+      ta.dataset.sgBound = "1";
       ta.focus();
     }
   }
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", bind);
-  } else {
-    bind();
-  }
+  window.__smartGraderBind = bind;
+  bind();
 })();
-</script>
 """
