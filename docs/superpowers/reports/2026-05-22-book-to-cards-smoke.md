@@ -58,10 +58,20 @@ This confirms:
 
 ## Typed-answer flow (follow-up)
 
-After the initial smoke run I drove a fresh review of the `Book - small` deck via computer-use. The typed-answer UI activated as expected; both pass and fail paths verified:
+After the initial smoke run I drove a fresh review of the `Book - small` deck via computer-use and exercised six cards across the full range of expected behaviours.
 
-- **Pass:** typed `Photosynthesis converts light energy into chemical energy.` → `✓ Passed`, similarity `1.000` / threshold `0.875`, all three chips (`photosynthesis`, `light energy`, `chemical energy`) green/found.
-- **Fail:** typed `Inside cells, in green plant parts.` on the next card → `✗ Missing required keyword(s)`, two missing chips (`photosynthesis`, `chloroplasts`), similarity not computed (keyword check fails fast), and an inline diff annotating what the answer lacked.
+| # | Question | Answer typed | Verdict | Sim / Thresh | Notes |
+|---|---|---|---|---|---|
+| 1 | What does photosynthesis convert light energy into? | `Photosynthesis converts light energy into chemical energy stored in glucose, occurring in chloroplasts.` | ✓ Passed | 1.000 / 0.875 | Verbatim-plus-extra, 3/3 keywords |
+| 2a | Where does photosynthesis occur? | `Inside cells, in green plant parts.` | ✗ Missing required keyword(s) | n/a | 0/2 keywords; similarity skipped |
+| 2b | (same card, retry) | `Photosynthesis happens inside chloroplasts within plant cells.` | ✓ Passed | 0.774 / 0.758 | Reworded; barely cleared threshold |
+| 3 | What enzyme is responsible for fixing carbon dioxide in the Calvin cycle? | `RuBisCO transports oxygen to root nodules in legumes.` | ✗ Missing required keyword(s) | n/a | 1/4 keywords (only `RuBisCO`); similarity skipped |
+| 5 | How is ATP produced during the light reactions of photosynthesis? | `ATP is produced via chemiosmosis across the thylakoid membrane during the light reactions.` | ✓ Passed | 1.000 / 0.904 | Verbatim match, 5/5 keywords (tightest threshold seen) |
+| 6 | What is the primary function of mitochondria? | `Mitochondria are the cell's powerhouse, generating energy as ATP.` | ✓ Passed | 0.874 / 0.825 | Paraphrased, 5/5 keywords; inline diff renders correctly |
+
+Keyboard shortcut **Cmd+Enter** also confirmed working as the submit hotkey (placeholder text claims this); used on Card 5 instead of the button click.
+
+Threshold variance — from 0.758 (Card 2) to 0.904 (Card 5) — confirms per-card calibration is doing real work: shorter, more generic reference answers get loose thresholds; tightly-worded technical statements get strict ones.
 
 ### Bug discovered and fixed
 
