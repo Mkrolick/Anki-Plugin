@@ -47,3 +47,36 @@ def test_reduce_skips_invalid_indices(fake_llm):
     canned = [{"cards": [{"front": "Q", "back": "A", "source_quote_indices": [0, 5]}]}]
     cards = reduce_topic(topic, llm=fake_llm(canned))
     assert cards[0].source_quotes == ["q0"]
+
+
+def test_reduce_includes_page_context_when_provided(fake_llm):
+    """When the pages map is passed, every referenced page's full text is
+    embedded in the user prompt before the quotes."""
+    from book_to_cards.pipeline.reduce_cards import reduce_topic
+    topic = _topic("X", ["X"], [
+        {"text": "f", "quote": "short quote", "topic": "X", "pages": [3, 5]},
+    ])
+    pages_map = {
+        3: "Full text of page 3 with surrounding sentences and more context.",
+        5: "Full text of page 5 explaining the broader argument.",
+        7: "Unrelated page — should not appear.",
+    }
+    canned = [{"cards": [{"front": "Q", "back": "A", "source_quote_indices": [0]}]}]
+    llm = fake_llm(canned)
+    reduce_topic(topic, llm=llm, pages=pages_map)
+    user_msg = llm.calls[0]["user"]
+    assert "[Page 3]" in user_msg
+    assert "Full text of page 3" in user_msg
+    assert "[Page 5]" in user_msg
+    assert "Unrelated page" not in user_msg
+
+
+def test_reduce_works_without_pages_map(fake_llm):
+    """Backwards-compat: omitting the pages map still produces a valid prompt."""
+    from book_to_cards.pipeline.reduce_cards import reduce_topic
+    topic = _topic("X", ["X"], [{"text": "f", "quote": "q", "topic": "X", "pages": [1]}])
+    canned = [{"cards": [{"front": "Q", "back": "A", "source_quote_indices": [0]}]}]
+    llm = fake_llm(canned)
+    cards = reduce_topic(topic, llm=llm)
+    assert len(cards) == 1
+    assert "Source pages" not in llm.calls[0]["user"]  # section omitted when no map

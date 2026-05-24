@@ -185,11 +185,28 @@ class BookRunner(QThread):
             aspects = [Aspect(**a) for a in t["aspects"]]
             topics.append(Topic(canonical=t["canonical"], aliases=t["aliases"], aspects=aspects))
 
+        # Load the page-text map once so reduce_topic can include surrounding
+        # context, not just the verbatim quotes. Pages whose lookup misses
+        # (rare; some source_pages come through as strings) are silently
+        # skipped — the quotes still anchor evidence.
+        extract = json.loads((run_dir / "extract.json").read_text())
+        pages_map: dict[int, str] = {}
+        for p in extract.get("pages", []):
+            try:
+                pages_map[int(p["index"])] = p.get("text", "")
+            except (KeyError, TypeError, ValueError):
+                continue
+
         for i, topic in enumerate(topics):
             if i < resume_from:
                 continue
             try:
-                cards = reduce_topic(topic, llm=client, model=get_config()["chat_model"])
+                cards = reduce_topic(
+                    topic,
+                    llm=client,
+                    model=get_config()["chat_model"],
+                    pages=pages_map,
+                )
                 for c in cards:
                     append_jsonl(run_dir / "cards.jsonl", c.to_dict())
             except Exception as e:
@@ -214,28 +231,49 @@ class BookRunner(QThread):
     def _do_precalibrate(self, run_dir: Path, client: OpenAIClient, *, resume_from: int):
         """Background-thread stage: pre-compute calibration data for every card.
 
-        Each card already on `calibrated.jsonl` is skipped (resume). The
-        expensive LLM + embedding work runs here so the on-main insert phase
-        only has to write fields, which is fast.
+        Runs N workers in parallel (config: `calibrate_concurrency`). Each
+        worker handles one card end-to-end: keywords → paraphrases → batched
+        embeddings → threshold. Results are appended to `calibrated.jsonl`
+        in completion order; each line carries the card's input index so
+        resume can detect which inputs are still missing.
+
+        Anki's main thread is never touched here.
         """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         self.stage_started.emit("calibrate")
-        # smart_grader maintains its own OpenAI cost meter that we can't read
-        # from here, so anchor the displayed running total to whatever our own
-        # meter said at the end of reduce, plus a flat-rate estimate per card.
         self._calibrate_baseline_usd = float(client.meter.usd)
         records = [c for c in read_jsonl(run_dir / "cards.jsonl") if c.get("_complete") is not True]
+        total = len(records)
+
+        # Resume: skip any input index already present in calibrated.jsonl.
+        # We treat presence of `_input_index` as the authoritative key so a
+        # previous serial run (without the index) still has its rows usable —
+        # but new work always tags its index.
+        done_indices: set[int] = set()
+        cal_path = run_dir / "calibrated.jsonl"
+        if cal_path.exists():
+            for rec in read_jsonl(cal_path):
+                if rec.get("_complete") is True:
+                    continue
+                idx = rec.get("_input_index")
+                if isinstance(idx, int):
+                    done_indices.add(idx)
+        # Legacy compatibility: resume_from is a count-based fallback when
+        # _input_index isn't present (pre-parallel runs).
+        if not done_indices and resume_from:
+            done_indices = set(range(resume_from))
 
         if self.skip_calibration:
-            # Pass cards through untouched so _do_insert finds calibrated.jsonl.
-            for c in records:
-                if "calibration" not in c:
-                    c["calibration"] = None
-                append_jsonl(run_dir / "calibrated.jsonl", c)
-            mark_complete(run_dir / "calibrated.jsonl")
+            for i, c in enumerate(records):
+                if i in done_indices:
+                    continue
+                payload = {**c, "_input_index": i, "calibration": None}
+                append_jsonl(cal_path, payload)
+            mark_complete(cal_path)
             return
 
-        # smart_grader may not be installed; we still run the rest of the
-        # pipeline but skip calibration cleanly.
         try:
             from smart_grader.api import is_available, precompute_calibration
             sg_available = is_available()
@@ -243,36 +281,68 @@ class BookRunner(QThread):
             sg_available = False
             precompute_calibration = None
 
-        total = len(records)
-        for i, c in enumerate(records):
-            if i < resume_from:
-                continue
-            if not sg_available or precompute_calibration is None:
-                c["calibration"] = None
-            else:
-                try:
-                    cal = precompute_calibration(
-                        question=c.get("front", ""),
-                        reference=c.get("back", ""),
-                    )
-                    c["calibration"] = cal
-                except Exception as e:
+        if not sg_available or precompute_calibration is None:
+            for i, c in enumerate(records):
+                if i in done_indices:
+                    continue
+                payload = {**c, "_input_index": i, "calibration": None}
+                append_jsonl(cal_path, payload)
+            mark_complete(cal_path)
+            return
+
+        cfg = get_config()
+        concurrency = max(1, int(cfg.get("calibrate_concurrency", 8)))
+
+        # append_jsonl is not atomic for lines >PIPE_BUF (4KB). Our records
+        # carry a 1536-float embedding, well over that. Serialise writes.
+        write_lock = threading.Lock()
+        completed = [len(done_indices)]  # mutable counter for the closure
+
+        def _worker(i: int, c: dict) -> dict | None:
+            if self._stop:
+                return None
+            try:
+                cal = precompute_calibration(
+                    question=c.get("front", ""),
+                    reference=c.get("back", ""),
+                )
+                payload = {**c, "_input_index": i, "calibration": cal}
+            except Exception as e:
+                with write_lock:
                     append_jsonl(run_dir / "errors.jsonl", {
                         "stage": "calibrate",
                         "card_front": c.get("front", "")[:80],
                         "error": str(e),
                     })
-                    c["calibration"] = None
-            append_jsonl(run_dir / "calibrated.jsonl", c)
-            self.topic_done.emit(i + 1, total)
-            # Rough cost estimate so the meter doesn't freeze. smart_grader's
-            # own meter is the source of truth; this is a visible-feedback hack.
+                payload = {**c, "_input_index": i, "calibration": None}
+            with write_lock:
+                append_jsonl(cal_path, payload)
+                completed[0] += 1
+                done = completed[0]
+            self.topic_done.emit(done, total)
             self.cost_updated.emit(
-                self._calibrate_baseline_usd + (i + 1) * self._PER_CARD_CALIBRATE_USD
+                self._calibrate_baseline_usd + done * self._PER_CARD_CALIBRATE_USD
             )
-            if self._stop:
-                raise RuntimeError("stopped by user")
-        mark_complete(run_dir / "calibrated.jsonl")
+            return payload
+
+        pending = [(i, c) for i, c in enumerate(records) if i not in done_indices]
+        if not pending:
+            mark_complete(cal_path)
+            return
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = [pool.submit(_worker, i, c) for i, c in pending]
+            for fut in as_completed(futures):
+                if self._stop:
+                    # Best-effort cancel; in-flight workers still finish.
+                    for f in futures:
+                        f.cancel()
+                    raise RuntimeError("stopped by user")
+                # Propagate worker exceptions (they shouldn't raise because
+                # _worker swallows them, but be defensive).
+                fut.result()
+
+        mark_complete(cal_path)
 
     def _do_insert(self, run_dir: Path) -> dict:
         """Main-thread stage: write notes + apply pre-computed calibration.
