@@ -27,7 +27,11 @@ _CACHE_PATH = os.path.join(os.path.dirname(__file__), "embedding_cache.sqlite")
 
 
 def _cache_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(_CACHE_PATH)
+    # 10s busy_timeout so the cache survives many parallel calibrate workers
+    # opening fresh connections concurrently. Writes are small and serialised
+    # at the SQLite level; contention should be brief.
+    conn = sqlite3.connect(_CACHE_PATH, timeout=10.0)
+    conn.execute("PRAGMA busy_timeout = 10000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS embeddings ("
         "  key TEXT PRIMARY KEY,"

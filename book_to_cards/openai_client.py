@@ -59,7 +59,10 @@ class CostMeter:
 
 
 def _cache_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(_CACHE_PATH)
+    # 10s busy_timeout so the cache survives parallel calibration workers
+    # opening fresh connections concurrently.
+    conn = sqlite3.connect(_CACHE_PATH, timeout=10.0)
+    conn.execute("PRAGMA busy_timeout = 10000")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS embeddings ("
         "  key TEXT PRIMARY KEY,"

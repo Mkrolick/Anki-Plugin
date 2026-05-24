@@ -7,5 +7,6 @@
     "cluster_distance": 0.25,
     "max_cards_per_topic": 5,
     "default_max_cost_usd": 5.0,
-    "skip_per_card_calibration": false
+    "skip_per_card_calibration": false,
+    "calibrate_concurrency": 8
 }

@@ -13,6 +13,11 @@ DEFAULTS = {
     "max_cards_per_topic": 5,
     "default_max_cost_usd": 5.0,
     "skip_per_card_calibration": False,
+    # Number of cards calibrated in parallel during the precalibrate stage.
+    # Each worker issues ~2 chat completions + 1 batched embedding call per
+    # card; OpenAI's per-second rate limits are well above 8 concurrent
+    # requests on typical accounts. Lower to 1 to force serial behaviour.
+    "calibrate_concurrency": 8,
 }
 
 
