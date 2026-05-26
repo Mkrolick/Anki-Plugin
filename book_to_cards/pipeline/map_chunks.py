@@ -77,6 +77,17 @@ def run_map(pages, *, llm, size: int, overlap: int, model: str | None = None):
             aspects = response.get("aspects") or []
             if not isinstance(aspects, list):
                 raise RuntimeError(f"map returned non-list aspects: {type(aspects).__name__}")
+            # Observation from real-book runs: the LLM is unreliable at echoing
+            # back the absolute [Page N] markers we put in the prompt. It often
+            # returns chunk-relative ints (0, 1, 2…) or even single small digits
+            # unrelated to the actual page. That makes per-aspect attribution
+            # untrustworthy, and the reduce stage's pages_map lookup would pull
+            # wrong context. Drop whatever the LLM returned and replace with the
+            # chunk's full page list — less precise per aspect, but guaranteed
+            # to contain the real source page.
+            for a in aspects:
+                if isinstance(a, dict):
+                    a["source_pages"] = list(source_pages)
             yield {
                 "chunk_index": i,
                 "source_pages": source_pages,

@@ -39,6 +39,68 @@ def test_map_attaches_source_page_indices(fake_llm):
     assert chunk_result["aspects"][0]["topic"] == "t"
 
 
+def test_map_overrides_aspect_source_pages_with_chunk_pages(fake_llm):
+    """The LLM is unreliable at echoing back absolute page markers — it often
+    returns chunk-relative or random small ints. run_map must overwrite each
+    aspect's source_pages with the chunk's actual page indices so reduce's
+    pages_map lookup hits the right pages.
+    """
+    from book_to_cards.pipeline.map_chunks import run_map
+    from book_to_cards.pipeline.types import Page
+
+    # 6-page book; chunk_iter with size=5, overlap=1 yields chunks
+    # [0..4] and [4..5]. We'll only verify the first chunk for clarity.
+    pages = [Page(index=i, text=f"page {i}") for i in range(6)]
+
+    # LLM returns wildly wrong source_pages — both relative ints AND
+    # an out-of-range page that doesn't exist in this chunk.
+    canned = [
+        {"aspects": [
+            {"text": "fact A", "quote": "q", "topic": "t",
+             "source_pages": [0]},          # LLM says page 0
+            {"text": "fact B", "quote": "q", "topic": "t",
+             "source_pages": [1]},          # LLM says page 1
+            {"text": "fact C", "quote": "q", "topic": "t",
+             "source_pages": [42]},         # LLM hallucinated page 42
+        ]},
+        {"aspects": []},
+    ]
+    llm = fake_llm(canned)
+    results = list(run_map(pages, llm=llm, size=5, overlap=1))
+
+    first = results[0]
+    expected_pages = [0, 1, 2, 3, 4]
+    assert first["source_pages"] == expected_pages
+    # Every aspect's source_pages must now equal the chunk's page list,
+    # regardless of what the LLM returned.
+    for asp in first["aspects"]:
+        assert asp["source_pages"] == expected_pages, (
+            f"aspect.source_pages should be overridden to chunk pages; "
+            f"got {asp['source_pages']}"
+        )
+
+
+def test_map_override_preserves_chunk_membership_across_chunks(fake_llm):
+    """When chunks have different page ranges, each chunk's aspects get
+    their own chunk's pages — they don't leak across."""
+    from book_to_cards.pipeline.map_chunks import run_map
+    from book_to_cards.pipeline.types import Page
+
+    pages = [Page(index=i, text=f"page {i}") for i in range(13)]
+    # chunk_iter(size=5, overlap=1) yields [0..4], [4..8], [8..12]
+    canned = [
+        {"aspects": [{"text": "x", "quote": "q", "topic": "t", "source_pages": [0]}]},
+        {"aspects": [{"text": "x", "quote": "q", "topic": "t", "source_pages": [1]}]},
+        {"aspects": [{"text": "x", "quote": "q", "topic": "t", "source_pages": [99]}]},
+    ]
+    llm = fake_llm(canned)
+    results = list(run_map(pages, llm=llm, size=5, overlap=1))
+
+    assert results[0]["aspects"][0]["source_pages"] == [0, 1, 2, 3, 4]
+    assert results[1]["aspects"][0]["source_pages"] == [4, 5, 6, 7, 8]
+    assert results[2]["aspects"][0]["source_pages"] == [8, 9, 10, 11, 12]
+
+
 def test_map_continues_on_chunk_failure():
     from book_to_cards.pipeline.map_chunks import run_map
 
